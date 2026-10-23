@@ -141,9 +141,9 @@ agents' reviews, summary-only bot text or a review of an older commit (unless th
 PR's change against `main` is identical at both commits). Protected paths (the
 binding, protocol, packet, connection/TLS and `compat` modules, every workflow,
 the release and lane-audit scripts, and the gate itself) need a maintainer's
-`APPROVED` review. A PR can publish a check with the same name, so the check is
-a reading aid and must not be made a required status check until it is posted
-from an identity a PR cannot impersonate (#945).
+`APPROVED` review. A PR can publish a check with the same name, so this is an informational
+reading aid, not an authenticated merge gate. Keep it advisory and do not
+require it in branch protection (maintainer decision, 2026-10-23).
 
 **Human contributions** — use the repository's ordinary contributor and review
 requirements. This route is not a fallback for unnamed standalone agents, which
