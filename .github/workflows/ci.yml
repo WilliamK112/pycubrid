@@ -197,6 +197,7 @@ jobs:
               - 'tests/test_release_summary.py'
               - 'tests/test_third_party_licenses.py'
               - 'tests/test_verify_dist.py'
+              - 'tests/test_wait_for_cubrid.py'
               - 'agent-evals/**'
               - 'docs/quickstart.md'
               - 'docs/ko/quickstart.md'
