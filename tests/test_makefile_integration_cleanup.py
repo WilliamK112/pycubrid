@@ -60,7 +60,10 @@ def _stubs(tmp_path: Path, readiness: str | None = None) -> dict[str, str]:
     _executable(tmp_path / "sleep", "#!/bin/sh\nexit 0\n")
     _executable(
         tmp_path / "pytest-stub",
-        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$REVIEW_PYTEST_LOG"\nexit "$REVIEW_PYTEST_EXIT"\n',
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$REVIEW_PYTEST_LOG"\n'
+        'for a in "$@"; do case "$a" in --junitxml=*) [ -z "$REVIEW_JUNIT" ] || '
+        'printf "%s" "$REVIEW_JUNIT" > "${a#--junitxml=}" ;; esac; done\n'
+        'exit "$REVIEW_PYTEST_EXIT"\n',
     )
     readiness = readiness or (
         'printf "%s|%s|%s|%s|%s\\n" "$CUBRID_TEST_DOCKER_CONTAINER" "$CUBRID_TEST_URL" '
@@ -72,6 +75,7 @@ def _stubs(tmp_path: Path, readiness: str | None = None) -> dict[str, str]:
         "#!/bin/sh\n"
         'case "$1" in\n'
         f'  *run_integration.py) exec {shlex.quote(sys.executable)} "$@" ;;\n'
+        f'  *report_results.py) exec {shlex.quote(sys.executable)} "$@" ;;\n'
         '  *check_integration_lanes.py) printf "%s\\n" "$*" >> "$REVIEW_AUDIT_LOG"; '
         'exit "$REVIEW_AUDIT_EXIT" ;;\n'
         "  *wait_for_cubrid.py) ;;\n"
@@ -647,3 +651,79 @@ def test_second_run_of_the_same_project_is_refused_without_docker(
     assert f"another run owns project '{project}'" in result.stderr
     assert result.log_text == ""
     assert _read(tmp_path / "pytest.log") == ""
+
+
+PASSING_JUNIT = '<testsuite><testcase classname="tests.t" name="test_a"/></testsuite>'
+FAILING_JUNIT = (
+    '<testsuite><testcase classname="tests.t" name="test_a"><failure message="x"/></testcase>'
+    "</testsuite>"
+)
+
+
+def _results(tmp_path: Path) -> dict[str, object]:
+    import json
+
+    return json.loads((tmp_path / "summary.json").read_text())
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_passing_run_writes_summary_and_environment_without_secrets(
+    tmp_path: Path, target: str
+) -> None:
+    secret = "topsecret-1024"
+    result = _run_make(
+        tmp_path,
+        target,
+        extra_env={
+            "REVIEW_JUNIT": PASSING_JUNIT,
+            "CUBRID_PASSWORD": secret,
+            "CUBRID_TEST_PASSWORD": secret,
+        },
+        make_args=[f"CUBRID_PASSWORD={secret}"],
+    )
+    assert result.returncode == 0, result.stderr
+    summary = _results(tmp_path)
+    assert summary["status"] == "PASS" and summary["exit_code"] == 0
+    assert f"{summary['lane']}: PASS" in result.stdout
+    assert "logs --no-color" not in result.log_text
+    assert not (tmp_path / "service.log").exists()
+    assert (tmp_path / "environment.json").is_file()
+    for path in tmp_path.rglob("*"):
+        if path.is_file() and path.suffix in {".json", ".xml", ".log"}:
+            assert secret not in path.read_text(), path
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_failing_run_reports_fail_saves_service_log_and_keeps_status(
+    tmp_path: Path, target: str
+) -> None:
+    result = _run_make(tmp_path, target, pytest_exit=1, extra_env={"REVIEW_JUNIT": FAILING_JUNIT})
+    assert result.returncode != 0
+    assert "Error 1" in result.stderr
+    summary = _results(tmp_path)
+    assert summary["status"] == "FAIL" and summary["exit_code"] == 1
+    assert "logs --no-color cubrid" in result.log_text
+    assert (tmp_path / "service.log").is_file()
+    assert result.log_text.rstrip().endswith("down -v")
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_run_without_junit_is_incomplete_not_pass(tmp_path: Path, target: str) -> None:
+    result = _run_make(tmp_path, target)
+    assert result.returncode == 0, result.stderr
+    assert _results(tmp_path)["status"] == "INCOMPLETE"
+
+
+def test_default_results_live_under_test_results() -> None:
+    """With no INTEGRATION_RESULTS the runner picks test-results/<lane>/junit.xml (#1024)."""
+    from scripts.run_integration import RESULT_DIRS
+
+    assert RESULT_DIRS == {"normal": "integration", "tls": "integration-tls"}
+    for target in TARGETS:
+        recipe = subprocess.run(
+            ["make", "-n", "-C", str(ROOT), target],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert '--results ""' in recipe

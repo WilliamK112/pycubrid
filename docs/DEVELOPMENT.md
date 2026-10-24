@@ -339,6 +339,24 @@ reported and fails an otherwise passing run.
 TLS tests need an SSL-enabled broker; see
 [Async TLS integration tests](#async-tls-integration-tests).
 
+**Result files (#1024).** `make test` writes `test-results/test/junit.xml`,
+`coverage.xml`, `summary.json` and `environment.json`; `make integration` and
+`make integration-tls` write `test-results/integration/` and
+`test-results/integration-tls/` (`junit.xml`, `summary.json`, `environment.json`, and
+`service.log` after a failed run). The directory is gitignored and `make clean` removes it.
+`scripts/report_results.py` builds `summary.json` (`schema_version`, `lane`, `status`,
+`exit_code`, per-outcome `counts`, `coverage`) and prints the same status and counts as one
+console line. `status` is `PASS` only when at least one test passed, none failed or
+errored and the exit status was 0; `FAIL` when a test failed or the command exited
+non-zero (including a missed coverage floor); `INCOMPLETE` when nothing proves the lane
+ran (no JUnit file, nothing collected, every test skipped). A test that fails and also
+errors in teardown counts once, with its worst outcome. `environment.json` holds the
+Python, pycubrid and CUBRID image versions, the platform and the command, built from those
+values only, so no password or other secret reaches a result file. The files never change a
+command's exit status. `INTEGRATION_RESULTS=<path>` moves the integration JUnit file, and
+the other files go next to it. CI does not use these targets yet; its own result
+upload is tracked separately in #1024.
+
 
 **Isolation from `make docker-up` (#1021).** `make integration` and `make integration-tls` run in their own Compose project, `pycubrid-it-<timestamp>-<pid>` by default, and pass `-p <project>` on every `docker compose` call, so they never attach to, restart or remove the CUBRID started by `make docker-up` (an exported `COMPOSE_PROJECT_NAME` is ignored too). Set `INTEGRATION_PROJECT=<name>` (`^[a-z0-9][a-z0-9_-]*$`) to choose the name; the run first checks that the project has no container, volume or network and otherwise exits 1 with "Refusing to run" before starting or removing anything. A second run of the same name while the first is active is refused too ("another run owns project"), through a `flock` on a lock file in the temp directory held until cleanup ends (POSIX only; the guard is skipped on Windows). Because the project is the run's own, cleanup after success, readiness failure, test failure, SIGINT or SIGTERM is `docker compose -p <project> down -v`: it also deletes the run's volumes, so every run starts from an empty database and leaves nothing behind. The manual lab's data volumes are never touched. `make docker-down` keeps the manual lab's data; only `make docker-clean` (`down -v` on the default project) removes it. Use `make integration-local` to test an existing broker without managing Docker. Cleanup also runs on SIGINT and SIGTERM (the run stops the current step and exits 130), except that a `make integration` started as a background job (`&`) of a non-interactive shell ignores SIGINT, per POSIX, while SIGTERM still runs cleanup.
 
@@ -661,11 +679,11 @@ lint/format/typecheck.
 | `make format-check` | Run ruff format --check (never modifies files) |
 | `make format` | Auto-fix lint and formatting issues (the only mutating quality target) |
 | `make check` | Static quality gate: lint, format-check, typecheck, security, docs-reason-check (`make check-all` is a deprecated alias) |
-| `make test` | Run offline tests with coverage |
+| `make test` | Run offline tests with coverage; writes `test-results/test/` (JUnit, coverage, `summary.json`) |
 | `make verify` | `make check` then `make test`; no Docker |
 | `make integration` | Docker (run-owned Compose project) → readiness wait → integration tests → skip audit → cleanup (`CUBRID_TEST_PORT=<port>` to move the broker, `INTEGRATION_PROJECT=<name>` to name the project) |
 | `make integration-local` | Integration tests against an already-running server (`CUBRID_TEST_URL` or `CUBRID_TEST_HOST`/`PORT`) |
-| `make clean` | Remove build artifacts |
+| `make clean` | Remove build artifacts and `test-results/` |
 
 ---
 

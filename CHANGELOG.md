@@ -17,6 +17,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **`make test` and `make integration` write `test-results/` (#1024)** — `make test`
+  writes `junit.xml`, `coverage.xml`, `summary.json` and `environment.json` to
+  `test-results/test/`; `make integration` and `make integration-tls` write them (and
+  `service.log` after a failed run) to `test-results/integration/` and
+  `test-results/integration-tls/`. `scripts/report_results.py` reports `PASS`, `FAIL` or
+  `INCOMPLETE` and prints the same one-line summary; a skipped or unexecuted lane is never
+  `PASS`, no credential is written, and exit codes are unchanged. The directory is gitignored
+  and `make clean` removes it. `INTEGRATION_RESULTS` no longer defaults to
+  `integration-results.xml` in the repository root. CI is unchanged.
 - **Makefile targets have one meaning each (#1007)** — `make lint` runs only `ruff check`;
   `make format` is the only quality target that modifies files. `make check` is the complete
   static gate: `lint`, `format-check`, `typecheck`, `security` and `docs-reason-check`.

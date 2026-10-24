@@ -47,6 +47,10 @@ it exits non-zero, without a success line, when one is missing or broken.
 make test
 ```
 
+`make test` and `make integration` also write `test-results/` (JUnit, `summary.json` with
+`PASS`/`FAIL`/`INCOMPLETE`, `environment.json`; gitignored, removed by `make clean`); see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#integration-tests) for the files.
+
 ### Integration tests
 
 ```bash

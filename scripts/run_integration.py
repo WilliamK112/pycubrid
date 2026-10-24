@@ -15,10 +15,16 @@ recipes used to spell out in shell:
 2. ``scripts/wait_for_cubrid.py 36 5``, given the compose container ID in
    ``CUBRID_TEST_DOCKER_CONTAINER`` so a volume registered for a stale host fails
    fast with a repair hint (#1000);
-3. pytest for the lane, writing JUnit XML to ``--results``;
+3. pytest for the lane, writing JUnit XML to ``--results`` (default
+   ``test-results/integration/junit.xml``, ``test-results/integration-tls/junit.xml`` for
+   the TLS lane);
 4. ``scripts/check_integration_lanes.py --results ...``, which fails when every
    selected test skipped;
-5. ``docker compose -p <project> down -v``, whatever happened before. The volumes
+5. ``scripts/report_results.py``, which writes ``summary.json`` (PASS, FAIL or INCOMPLETE)
+   and ``environment.json`` next to the JUnit file, and prints the one-line summary; after
+   a failure, the service log is saved as ``service.log`` before cleanup (#1024). Result
+   files never contain credentials and never change the exit status;
+6. ``docker compose -p <project> down -v``, whatever happened before. The volumes
    belong to the run-owned project, so each run starts from an empty database and
    leaves nothing behind; the ``make docker-up`` project and its volumes are never
    touched (``make docker-clean`` remains the way to delete those).
@@ -33,7 +39,7 @@ so a stray ``CUBRID_TEST_*`` export cannot redirect the run to another server.
 Usage (see the Makefile)::
 
     python scripts/run_integration.py --lane normal --python python3 \
-        --pytest "python3 -m pytest" --port 33000 --results integration-results.xml
+        --pytest "python3 -m pytest" --port 33000
 """
 
 from __future__ import annotations
@@ -62,6 +68,8 @@ READINESS_ARGS = ("36", "5")
 PROJECT_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*")
 # Volumes of docker-compose.yml (#1000, #1002).
 DATA_VOLUMES = ("cubrid-data", "cubrid-databases")
+# Default result directory name of each lane under test-results/ (#1024).
+RESULT_DIRS = {"normal": "integration", "tls": "integration-tls"}
 # Which tests each lane runs is unchanged from the former Makefile recipes.
 LANES = {
     "normal": ("tests/", "-m", "integration and not tls", "-v"),
@@ -170,6 +178,37 @@ def _compose_container(project: str) -> str:
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
+def _report(args: argparse.Namespace, results: Path, status: int) -> None:
+    """Write environment.json and summary.json; a reporting failure never changes the status."""
+    python = shlex.split(args.python)
+    version = os.environ.get("CUBRID_VERSION") or "11.2"
+    command = f"make {'integration-tls' if args.lane == 'tls' else 'integration'}"
+    common = ["--lane", RESULT_DIRS[args.lane], "--results-dir", str(results.parent)]
+    environment = [*python, "scripts/report_results.py", "environment", *common]
+    environment += ["--command", command, "--cubrid-version", version]
+    summarize = [*python, "scripts/report_results.py", "summarize", *common]
+    summarize += ["--junit", str(results), "--exit-code", str(status)]
+    for step in (environment, summarize):
+        code = subprocess.run(step, cwd=ROOT, check=False).returncode  # nosec B603 - fixed argv
+        if code:
+            print(
+                f"WARNING: report_results.py exited with status {code}", file=sys.stderr, flush=True
+            )
+
+
+def _save_service_log(project: str, results: Path, compose_env: dict[str, str]) -> None:
+    """Save the compose service log next to the results; best effort, after a failure only."""
+    with (results.parent / "service.log").open("wb") as log:
+        subprocess.run(  # nosec B603 B607 - fixed docker compose argv
+            ["docker", "compose", "-p", project, "logs", "--no-color", "cubrid"],
+            cwd=ROOT,
+            env=compose_env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+
 def _lane(args: argparse.Namespace, project: str, compose_env: dict[str, str]) -> int:
     status = _run(["docker", "compose", "-p", project, "up", "-d"], compose_env)
     if status:
@@ -206,9 +245,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--project", default="", help="Compose project name (default: run-unique pycubrid-it-*)"
     )
-    parser.add_argument("--results", required=True, help="JUnit XML path")
+    parser.add_argument(
+        "--results",
+        default="",
+        help="JUnit XML path (default: test-results/<integration|integration-tls>/junit.xml)",
+    )
     args = parser.parse_args(argv)
 
+    default = Path("test-results") / RESULT_DIRS[args.lane] / "junit.xml"
+    args.results = str(ROOT / (args.results or default))  # absolute: every step runs in ROOT
     project = args.project
     if project and not PROJECT_PATTERN.fullmatch(project):
         print(
@@ -246,6 +291,11 @@ def _run_owned(args: argparse.Namespace, project: str) -> int:
             flush=True,
         )
         return 1
+    results = Path(args.results)
+    results.parent.mkdir(parents=True, exist_ok=True)
+    for stale in ("summary.json", "environment.json", "service.log"):
+        (results.parent / stale).unlink(missing_ok=True)
+    results.unlink(missing_ok=True)
     print(f"Using run-owned Compose project '{project}' on host port {args.port}", flush=True)
     if args.lane == "tls":
         print(TLS_NOTE, flush=True)
@@ -266,6 +316,9 @@ def _run_owned(args: argparse.Namespace, project: str) -> int:
     if _signals["received"]:
         print(f"Interrupted by {_signals['received']}; cleaning up", file=sys.stderr, flush=True)
         status = INTERRUPTED
+    if status:
+        _save_service_log(project, results, compose_env)
+    _report(args, results, status)
 
     cleanup = subprocess.run(  # nosec B603 B607 - fixed docker compose argv
         ["docker", "compose", "-p", project, "down", "-v"], cwd=ROOT, env=compose_env, check=False

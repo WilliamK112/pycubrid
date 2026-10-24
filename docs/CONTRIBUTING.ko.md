@@ -48,6 +48,9 @@ pip install -e . --group dev
 make test
 ```
 
+`make test`와 `make integration`은 `test-results/`(JUnit, `PASS`/`FAIL`/`INCOMPLETE`를 담은
+`summary.json`, `environment.json`)도 씁니다. gitignore 대상이며 `make clean`이 삭제합니다.
+
 ### 통합 테스트
 
 ```bash

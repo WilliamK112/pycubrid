@@ -167,11 +167,13 @@ def test_check_all_is_a_deprecated_alias_of_check(tmp_path: Path) -> None:
 
 def test_verify_runs_check_then_offline_tests_without_docker(tmp_path: Path) -> None:
     calls = _calls(tmp_path, "verify")
-    static = [c for c in calls if "pytest" not in c]
+    reports = [c for c in calls if c.startswith("scripts/report_results.py")]
+    static = [c for c in calls if "pytest" not in c and c not in reports]
     tests = [c for c in calls if c.startswith("-m pytest")]
     _assert_check_calls(static)
     assert len(tests) == 1 and "-m not integration" in tests[0]
-    assert calls.index(tests[0]) == len(calls) - 1
+    # The result summaries (#1024) come after pytest, which is the last test step.
+    assert calls[-len(reports) - 1] == tests[0] and len(reports) == 2
     recipe = _make("verify", dry_run=True).stdout
     assert "docker" not in recipe and "run_integration" not in recipe
 
@@ -204,3 +206,21 @@ def test_help_groups_targets_by_purpose() -> None:
     } <= set(groups["Integration (Docker)"])
     documented = re.findall(r"^([a-zA-Z_-]+):.*?## ", MAKEFILE, re.MULTILINE)
     assert sorted(t for targets in groups.values() for t in targets) == sorted(documented)
+
+
+def test_test_writes_results_and_keeps_pytest_status(tmp_path: Path) -> None:
+    """`make test` passes pytest's status through and always summarizes it (#1024)."""
+    stub, log = _python_stub(tmp_path)
+    result = _make("test", f"PYTHON={stub}", env={"REVIEW_FAIL": "--cov-fail-under=95"})
+    assert result.returncode != 0
+    calls = log.read_text().splitlines()
+    assert "--junitxml=test-results/test/junit.xml" in calls[0]
+    assert "--cov-report=xml:test-results/test/coverage.xml" in calls[0]
+    assert [c.split()[1] for c in calls[1:]] == ["environment", "summarize"]
+    assert "--exit-code 1" in calls[2]
+    assert "--coverage test-results/test/coverage.xml" in calls[2]
+
+
+def test_clean_removes_test_results() -> None:
+    assert "test-results/" in _make("clean", dry_run=True).stdout
+    assert "test-results/" in (ROOT / ".gitignore").read_text().splitlines()

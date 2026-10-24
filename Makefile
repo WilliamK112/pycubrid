@@ -72,12 +72,26 @@ check-all: check ## Deprecated alias of check (removed after the next minor rele
 
 verify: check test ## Run check, then the offline tests (no Docker, no database)
 
-test: ## Run offline tests with coverage (no DB required)
+# Machine-readable results (#1024): junit.xml, coverage.xml, summary.json and
+# environment.json under test-results/test/ (gitignored). The summary reports PASS, FAIL
+# or INCOMPLETE and never changes the exit status, which stays pytest's own.
+TEST_RESULTS_DIR = test-results/test
+
+test: ## Run offline tests with coverage (no DB required); writes test-results/test/
+	@rm -rf -- "$(TEST_RESULTS_DIR)" && mkdir -p "$(TEST_RESULTS_DIR)"
 	$(PYTEST) $(TESTS)/ -v \
 		-m "not integration" \
 		--cov=$(SRC) \
 		--cov-report=term-missing \
-		--cov-fail-under=95
+		--cov-report=xml:$(TEST_RESULTS_DIR)/coverage.xml \
+		--junitxml=$(TEST_RESULTS_DIR)/junit.xml \
+		--cov-fail-under=95; \
+	status=$$?; \
+	$(PYTHON) scripts/report_results.py environment --lane test --results-dir "$(TEST_RESULTS_DIR)" \
+		--command 'make test'; \
+	$(PYTHON) scripts/report_results.py summarize --lane test --results-dir "$(TEST_RESULTS_DIR)" \
+		--exit-code $$status --coverage "$(TEST_RESULTS_DIR)/coverage.xml"; \
+	exit $$status
 
 agent-eval-check: ## Self-test the agent-evaluation grader and runner against their fixtures (#925)
 	$(PYTHON) scripts/agent_eval.py self-test
@@ -97,7 +111,10 @@ mutation: ## Run mutation testing on the driver core (pip install -e . --group d
 # to the compose service, so a stray CUBRID_TEST_* export cannot redirect the run,
 # and owns the Compose lifecycle, readiness, cleanup and exit status.
 CUBRID_TEST_PORT ?= 33000
-INTEGRATION_RESULTS ?= integration-results.xml
+# JUnit XML of the lane. Empty means test-results/integration/junit.xml (test-results/
+# integration-tls/junit.xml for the TLS lane); summary.json, environment.json and, after a
+# failure, service.log are written next to it (#1024).
+INTEGRATION_RESULTS ?=
 # Compose project of the run: empty means a run-unique pycubrid-it-<time>-<pid>. The
 # run refuses a project that already has resources and removes (down -v) only its own,
 # so it never touches the `make docker-up` project (#1021).
@@ -151,7 +168,7 @@ changelog: ## Generate changelog with git-cliff
 	git-cliff --output CHANGELOG.md
 
 clean: ## Remove build artifacts and caches
-	rm -rf build/ dist/ *.egg-info .pytest_cache/ .coverage .ruff_cache/ __pycache__/ mutants/
+	rm -rf build/ dist/ *.egg-info .pytest_cache/ .coverage .ruff_cache/ __pycache__/ mutants/ test-results/
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name '*.pyc' -delete 2>/dev/null || true
 
