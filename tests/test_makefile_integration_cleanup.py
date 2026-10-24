@@ -53,7 +53,8 @@ def _stubs(tmp_path: Path, readiness: str | None = None) -> dict[str, str]:
         '  *" compose "*" down "*) exit "$REVIEW_DOWN_EXIT" ;;\n'
         '  *" compose "*" up "*) exit "$REVIEW_UP_EXIT" ;;\n'
         f'  *" compose "*" ps -q cubrid "*) echo {CONTAINER} ;;\n'
-        '  *" ps -aq "*) [ -z "$REVIEW_EXISTING" ] || echo "$REVIEW_EXISTING" ;;\n'
+        '  *" ps -aq "*) [ -z "$REVIEW_EXISTING" ] || echo "$REVIEW_EXISTING"; '
+        'exit "${REVIEW_PROBE_EXIT:-0}" ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -75,7 +76,6 @@ def _stubs(tmp_path: Path, readiness: str | None = None) -> dict[str, str]:
         "#!/bin/sh\n"
         'case "$1" in\n'
         f'  *run_integration.py) exec {shlex.quote(sys.executable)} "$@" ;;\n'
-        f'  *report_results.py) exec {shlex.quote(sys.executable)} "$@" ;;\n'
         '  *check_integration_lanes.py) printf "%s\\n" "$*" >> "$REVIEW_AUDIT_LOG"; '
         'exit "$REVIEW_AUDIT_EXIT" ;;\n'
         "  *wait_for_cubrid.py) ;;\n"
@@ -727,3 +727,113 @@ def test_default_results_live_under_test_results() -> None:
             check=True,
         ).stdout
         assert '--results ""' in recipe
+
+
+STALE_PASS = '{"schema_version": 1, "lane": "integration", "status": "PASS", "exit_code": 0}'
+
+
+def _stale_pass(tmp_path: Path) -> None:
+    (tmp_path / "summary.json").write_text(STALE_PASS)
+    (tmp_path / "environment.json").write_text("{}")
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_cleanup_failure_summary_carries_the_final_status(tmp_path: Path, target: str) -> None:
+    """The summary is written after cleanup, so a failed `down -v` is FAIL with its status."""
+    extra = {"REVIEW_JUNIT": PASSING_JUNIT}
+    result = _run_make(tmp_path, target, down_exit=3, extra_env=extra)
+    assert result.returncode != 0 and "Error 3" in result.stderr
+    summary = _results(tmp_path)
+    assert (summary["status"], summary["exit_code"]) == ("FAIL", 3)
+    # A test failure keeps its own status when cleanup fails as well.
+    result = _run_make(
+        tmp_path, target, pytest_exit=7, down_exit=3, extra_env={"REVIEW_JUNIT": FAILING_JUNIT}
+    )
+    assert "Error 7" in result.stderr
+    assert (_results(tmp_path)["status"], _results(tmp_path)["exit_code"]) == ("FAIL", 7)
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_existing_project_refusal_replaces_a_stale_pass(tmp_path: Path, target: str) -> None:
+    _stale_pass(tmp_path)
+    result = _run_make(
+        tmp_path,
+        target,
+        extra_env={"REVIEW_EXISTING": CONTAINER},
+        make_args=["INTEGRATION_PROJECT=manual"],
+    )
+    assert result.returncode != 0
+    summary = _results(tmp_path)
+    assert (summary["status"], summary["exit_code"]) == ("FAIL", 1)
+    assert "already has resources" in str(summary["reason"])
+    assert " up -d" not in result.log_text and " down" not in result.log_text
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_failed_ownership_probe_replaces_a_stale_pass(tmp_path: Path, target: str) -> None:
+    _stale_pass(tmp_path)
+    result = _run_make(tmp_path, target, extra_env={"REVIEW_PROBE_EXIT": "5"})
+    assert result.returncode != 0
+    summary = _results(tmp_path)
+    assert (summary["status"], summary["exit_code"]) == ("FAIL", 5)
+    assert "ownership check failed" in str(summary["reason"])
+    assert " up -d" not in result.log_text and " down" not in result.log_text
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_invalid_project_name_replaces_a_stale_pass(tmp_path: Path, target: str) -> None:
+    _stale_pass(tmp_path)
+    _run_make(tmp_path, target, make_args=["INTEGRATION_PROJECT=Bad Name"])
+    assert (_results(tmp_path)["status"], _results(tmp_path)["exit_code"]) == ("FAIL", 2)
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_lock_refusal_leaves_the_active_runs_results_alone(tmp_path: Path, target: str) -> None:
+    fcntl = pytest.importorskip("fcntl")
+    import tempfile
+
+    _stale_pass(tmp_path)
+    (tmp_path / "service.log").write_text("active run")
+    project = f"it-results-lock-{os.getpid()}"
+    lock = Path(tempfile.gettempdir()) / f"pycubrid-integration-{project}.lock"
+    with open(lock, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = _run_make(tmp_path, target, make_args=[f"INTEGRATION_PROJECT={project}"])
+    lock.unlink(missing_ok=True)
+    assert result.returncode != 0 and "another run owns project" in result.stderr
+    assert (tmp_path / "summary.json").read_text() == STALE_PASS
+    assert (tmp_path / "service.log").read_text() == "active run"
+
+
+def test_service_log_failure_keeps_the_status_and_still_tears_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving the service log is best effort: an OSError must not skip `down -v` (#1024)."""
+    import argparse
+
+    from scripts import run_integration as ri
+
+    calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[0] != "docker":  # e.g. platform.platform() runs `uname`
+            return real_run(command, **kwargs)  # type: ignore[call-overload,no-any-return]
+        calls.append(list(command))
+        if "logs" in command:
+            raise PermissionError("cannot write the log")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(ri.subprocess, "run", fake_run)
+    monkeypatch.setattr(ri, "_owns_nothing", lambda project: True)
+    monkeypatch.setattr(ri, "_lane", lambda args, project, env: 7)
+    args = argparse.Namespace(
+        lane="normal",
+        port="33000",
+        python=sys.executable,
+        results=str(tmp_path / "junit.xml"),
+    )
+    assert ri._run_owned(args, "it-log-failure") == 7
+    assert any("down" in call for call in calls)
+    summary = _results(tmp_path)
+    assert (summary["status"], summary["exit_code"]) == ("FAIL", 7)

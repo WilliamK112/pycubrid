@@ -109,7 +109,9 @@ def decide(counts: dict[str, int] | None, exit_code: int) -> str:
     return "FAIL" if exit_code else "PASS"
 
 
-def build_summary(lane: str, junit: Path, coverage: Path | None, exit_code: int) -> dict[str, Any]:
+def build_summary(
+    lane: str, junit: Path, coverage: Path | None, exit_code: int, reason: str = ""
+) -> dict[str, Any]:
     counts = parse_junit(junit)
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -118,6 +120,8 @@ def build_summary(lane: str, junit: Path, coverage: Path | None, exit_code: int)
         "exit_code": exit_code,
         "counts": counts if counts is not None else dict.fromkeys(COUNTS, 0),
     }
+    if reason:
+        summary["reason"] = reason
     if coverage is not None:
         percent = parse_coverage(coverage)
         if percent is not None:
@@ -180,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         p.add_argument("--results-dir", required=True, type=Path)
     summarize.add_argument("--exit-code", required=True, type=int)
     summarize.add_argument("--junit", type=Path, help="default: <results-dir>/junit.xml")
+    summarize.add_argument("--reason", default="", help="why the run stopped early")
     summarize.add_argument("--coverage", type=Path, help="coverage.xml, when measured")
     environment.add_argument("--command", required=True)
     environment.add_argument("--cubrid-version")
@@ -194,7 +199,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_json(results / "environment.json", data)
         return 0
     summary = build_summary(
-        args.lane, args.junit or results / "junit.xml", args.coverage, args.exit_code
+        args.lane,
+        args.junit or results / "junit.xml",
+        args.coverage,
+        args.exit_code,
+        args.reason,
     )
     _write_json(results / "summary.json", summary)
     print(f"{console_line(summary)} -> {results / 'summary.json'}", flush=True)

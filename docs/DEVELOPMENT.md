@@ -353,7 +353,12 @@ ran (no JUnit file, nothing collected, every test skipped). A test that fails an
 errors in teardown counts once, with its worst outcome. `environment.json` holds the
 Python, pycubrid and CUBRID image versions, the platform and the command, built from those
 values only, so no password or other secret reaches a result file. The files never change a
-command's exit status. `INTEGRATION_RESULTS=<path>` moves the integration JUnit file, and
+command's exit status. For the integration lanes `summary.json` is written after cleanup,
+so it carries the final exit status (a failed `down -v` is `FAIL`), and saving `service.log`
+is best effort (a warning, never a skipped cleanup). The run that holds the project lock owns
+the files and removes the previous run's first; a refusal after the lock (existing project,
+failed ownership probe) or an invalid `INTEGRATION_PROJECT` leaves a `FAIL` summary with a
+`reason`, while a run refused because another run holds the lock writes and removes nothing. `INTEGRATION_RESULTS=<path>` moves the integration JUnit file, and
 the other files go next to it. CI does not use these targets yet; its own result
 upload is tracked separately in #1024.
 
